@@ -1,7 +1,7 @@
 use super::super::pyobject::{
     PyContext, PyFuncArgs, PyObject, PyObjectPayload, PyObjectRef, PyResult, TypeProtocol,
 };
-use super::super::vm::VirtualMachine;
+use super::super::vm::{ReprGuard, VirtualMachine};
 use super::objbool;
 use super::objint;
 use super::objsequence::{
@@ -213,18 +213,22 @@ fn tuple_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
 fn tuple_repr(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
     arg_check!(vm, args, required = [(zelf, Some(vm.ctx.tuple_type()))]);
 
-    let elements = get_elements(zelf);
+    let s = if let Some(_guard) = ReprGuard::enter(zelf) {
+        let elements = get_elements(zelf);
 
-    let mut str_parts = vec![];
-    for elem in elements.iter() {
-        let s = vm.to_repr(elem)?;
-        str_parts.push(objstr::get_value(&s));
-    }
+        let mut str_parts = vec![];
+        for elem in elements.iter() {
+            let s = vm.to_repr(elem)?;
+            str_parts.push(objstr::get_value(&s));
+        }
 
-    let s = if str_parts.len() == 1 {
-        format!("({},)", str_parts[0])
+        if str_parts.len() == 1 {
+            format!("({},)", str_parts[0])
+        } else {
+            format!("({})", str_parts.join(", "))
+        }
     } else {
-        format!("({})", str_parts.join(", "))
+        "(...)".to_string()
     };
     Ok(vm.new_str(s))
 }
@@ -290,6 +294,10 @@ pub fn tuple_contains(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
 
 pub fn init(context: &PyContext) {
     let tuple_type = &context.tuple_type;
+    let tuple_doc = "tuple() -> empty tuple
+tuple(iterable) -> tuple initialized from iterable's items
+
+If the argument is a tuple, the return value is the same object.";
     context.set_attr(&tuple_type, "__add__", context.new_rustfunc(tuple_add));
     context.set_attr(&tuple_type, "__eq__", context.new_rustfunc(tuple_eq));
     context.set_attr(
@@ -313,5 +321,10 @@ pub fn init(context: &PyContext) {
     context.set_attr(&tuple_type, "__le__", context.new_rustfunc(tuple_le));
     context.set_attr(&tuple_type, "__gt__", context.new_rustfunc(tuple_gt));
     context.set_attr(&tuple_type, "__ge__", context.new_rustfunc(tuple_ge));
+    context.set_attr(
+        &tuple_type,
+        "__doc__",
+        context.new_str(tuple_doc.to_string()),
+    );
     context.set_attr(&tuple_type, "index", context.new_rustfunc(tuple_index));
 }

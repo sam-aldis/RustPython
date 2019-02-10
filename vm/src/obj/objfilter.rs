@@ -7,7 +7,7 @@ use super::objbool;
 use super::objiter;
 use super::objtype; // Required for arg_check! to use isinstance
 
-pub fn filter_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
+fn filter_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
     arg_check!(
         vm,
         args,
@@ -21,21 +21,6 @@ pub fn filter_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
         },
         cls.clone(),
     ))
-}
-
-fn filter_iter(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(filter, Some(vm.ctx.filter_type()))]);
-    // Return self:
-    Ok(filter.clone())
-}
-
-fn filter_contains(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(filter, Some(vm.ctx.filter_type())), (needle, None)]
-    );
-    objiter::contains(vm, filter, needle)
 }
 
 fn filter_next(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
@@ -72,12 +57,19 @@ fn filter_next(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
 
 pub fn init(context: &PyContext) {
     let filter_type = &context.filter_type;
+
+    objiter::iter_type_init(context, filter_type);
+
+    let filter_doc =
+        "filter(function or None, iterable) --> filter object\n\n\
+         Return an iterator yielding those items of iterable for which function(item)\n\
+         is true. If function is None, return the items that are true.";
+
+    context.set_attr(&filter_type, "__new__", context.new_rustfunc(filter_new));
     context.set_attr(
         &filter_type,
-        "__contains__",
-        context.new_rustfunc(filter_contains),
+        "__doc__",
+        context.new_str(filter_doc.to_string()),
     );
-    context.set_attr(&filter_type, "__iter__", context.new_rustfunc(filter_iter));
-    context.set_attr(&filter_type, "__new__", context.new_rustfunc(filter_new));
     context.set_attr(&filter_type, "__next__", context.new_rustfunc(filter_next));
 }

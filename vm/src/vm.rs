@@ -7,19 +7,21 @@
 extern crate rustpython_parser;
 
 use std::collections::hash_map::HashMap;
+use std::collections::hash_set::HashSet;
+use std::sync::{Mutex, MutexGuard};
 
 use super::builtins;
 use super::bytecode;
 use super::frame::Frame;
-use super::obj::objcode::copy_code;
+use super::obj::objcode;
 use super::obj::objgenerator;
 use super::obj::objiter;
 use super::obj::objsequence;
 use super::obj::objstr;
 use super::obj::objtype;
 use super::pyobject::{
-    AttributeProtocol, DictProtocol, PyContext, PyFuncArgs, PyObjectPayload, PyObjectRef, PyResult,
-    TypeProtocol,
+    AttributeProtocol, DictProtocol, IdProtocol, PyContext, PyFuncArgs, PyObjectPayload,
+    PyObjectRef, PyResult, TypeProtocol,
 };
 use super::stdlib;
 use super::sysmodule;
@@ -104,6 +106,11 @@ impl VirtualMachine {
         self.new_exception(os_error, msg)
     }
 
+    pub fn new_overflow_error(&mut self, msg: String) -> PyObjectRef {
+        let overflow_error = self.ctx.exceptions.overflow_error.clone();
+        self.new_exception(overflow_error, msg)
+    }
+
     /// Create a new python ValueError object. Useful for raising errors from
     /// python functions implemented in rust.
     pub fn new_value_error(&mut self, msg: String) -> PyObjectRef {
@@ -122,8 +129,13 @@ impl VirtualMachine {
     }
 
     pub fn new_not_implemented_error(&mut self, msg: String) -> PyObjectRef {
-        let value_error = self.ctx.exceptions.not_implemented_error.clone();
-        self.new_exception(value_error, msg)
+        let not_implemented_error = self.ctx.exceptions.not_implemented_error.clone();
+        self.new_exception(not_implemented_error, msg)
+    }
+
+    pub fn new_zero_division_error(&mut self, msg: String) -> PyObjectRef {
+        let zero_division_error = self.ctx.exceptions.zero_division_error.clone();
+        self.new_exception(zero_division_error, msg)
     }
 
     pub fn new_scope(&mut self, parent_scope: Option<PyObjectRef>) -> PyObjectRef {
@@ -272,7 +284,7 @@ impl VirtualMachine {
         defaults: &PyObjectRef,
         args: PyFuncArgs,
     ) -> PyResult {
-        let code_object = copy_code(code);
+        let code_object = objcode::get_value(code);
         let scope = self.ctx.new_scope(Some(scope.clone()));
         self.fill_scope_from_args(&code_object, &scope, args, defaults)?;
 
@@ -439,9 +451,9 @@ impl VirtualMachine {
         value: &PyObjectRef,
     ) -> Result<Vec<PyObjectRef>, PyObjectRef> {
         // Extract elements from item, if possible:
-        let elements = if objtype::isinstance(value, &self.ctx.tuple_type()) {
-            objsequence::get_elements(value).to_vec()
-        } else if objtype::isinstance(value, &self.ctx.list_type()) {
+        let elements = if objtype::isinstance(value, &self.ctx.tuple_type())
+            || objtype::isinstance(value, &self.ctx.list_type())
+        {
             objsequence::get_elements(value).to_vec()
         } else {
             let iter = objiter::get_iter(self, value)?;
@@ -602,6 +614,42 @@ impl VirtualMachine {
 
     pub fn _ge(&mut self, a: &PyObjectRef, b: PyObjectRef) -> PyResult {
         self.call_method(a, "__ge__", vec![b])
+    }
+}
+
+lazy_static! {
+    static ref REPR_GUARDS: Mutex<HashSet<usize>> = { Mutex::new(HashSet::new()) };
+}
+
+pub struct ReprGuard {
+    id: usize,
+}
+
+/// A guard to protect repr methods from recursion into itself,
+impl ReprGuard {
+    fn get_guards<'a>() -> MutexGuard<'a, HashSet<usize>> {
+        REPR_GUARDS.lock().expect("ReprGuard lock poisoned")
+    }
+
+    /// Returns None if the guard against 'obj' is still held otherwise returns the guard. The guard
+    /// which is released if dropped.
+    pub fn enter(obj: &PyObjectRef) -> Option<ReprGuard> {
+        let mut guards = ReprGuard::get_guards();
+
+        // Should this be a flag on the obj itself? putting it in a global variable for now until it
+        // decided the form of the PyObject. https://github.com/RustPython/RustPython/issues/371
+        let id = obj.get_id();
+        if guards.contains(&id) {
+            return None;
+        }
+        guards.insert(id);
+        Some(ReprGuard { id })
+    }
+}
+
+impl Drop for ReprGuard {
+    fn drop(&mut self) {
+        ReprGuard::get_guards().remove(&self.id);
     }
 }
 

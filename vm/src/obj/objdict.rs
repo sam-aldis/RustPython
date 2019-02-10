@@ -1,11 +1,11 @@
 use super::super::pyobject::{
     PyContext, PyFuncArgs, PyObject, PyObjectPayload, PyObjectRef, PyResult, TypeProtocol,
 };
-use super::super::vm::VirtualMachine;
+use super::super::vm::{ReprGuard, VirtualMachine};
 use super::objiter;
 use super::objstr;
 use super::objtype;
-use std::cell::{Ref, RefMut};
+use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
@@ -158,16 +158,21 @@ fn dict_len(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
 fn dict_repr(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
     arg_check!(vm, args, required = [(dict_obj, Some(vm.ctx.dict_type()))]);
 
-    let elements = get_key_value_pairs(dict_obj);
-    let mut str_parts = vec![];
-    for (key, value) in elements {
-        let s = vm.to_repr(&value)?;
-        let key_str = objstr::get_value(&key);
-        let value_str = objstr::get_value(&s);
-        str_parts.push(format!("{}: {}", key_str, value_str));
-    }
+    let s = if let Some(_guard) = ReprGuard::enter(dict_obj) {
+        let elements = get_key_value_pairs(dict_obj);
+        let mut str_parts = vec![];
+        for (key, value) in elements {
+            let key_repr = vm.to_repr(&key)?;
+            let value_repr = vm.to_repr(&value)?;
+            let key_str = objstr::get_value(&key_repr);
+            let value_str = objstr::get_value(&value_repr);
+            str_parts.push(format!("{}: {}", key_str, value_str));
+        }
 
-    let s = format!("{{{}}}", str_parts.join(", "));
+        format!("{{{}}}", str_parts.join(", "))
+    } else {
+        "{...}".to_string()
+    };
     Ok(vm.new_str(s))
 }
 
@@ -273,7 +278,7 @@ fn dict_getitem(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
 pub fn create_type(type_type: PyObjectRef, object_type: PyObjectRef, dict_type: PyObjectRef) {
     (*dict_type.borrow_mut()).payload = PyObjectPayload::Class {
         name: String::from("dict"),
-        dict: new(dict_type.clone()),
+        dict: RefCell::new(HashMap::new()),
         mro: vec![object_type],
     };
     (*dict_type.borrow_mut()).typ = Some(type_type.clone());
