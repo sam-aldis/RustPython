@@ -2,22 +2,22 @@
  * Testing if a string is a keyword.
  */
 
-extern crate rustpython_parser;
-use self::rustpython_parser::lexer;
-use crate::obj::objstr;
-use crate::pyobject::{PyContext, PyFuncArgs, PyObjectRef, PyResult, TypeProtocol};
-use crate::VirtualMachine;
+use rustpython_parser::lexer;
 
-fn keyword_iskeyword(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(s, Some(vm.ctx.str_type()))]);
-    let s = objstr::get_value(s);
+use crate::obj::objstr::PyStringRef;
+use crate::pyobject::{PyObjectRef, PyResult};
+use crate::vm::VirtualMachine;
+
+fn keyword_iskeyword(s: PyStringRef, vm: &VirtualMachine) -> PyResult {
     let keywords = lexer::get_keywords();
-    let value = keywords.contains_key(&s);
+    let value = keywords.contains_key(s.as_str());
     let value = vm.ctx.new_bool(value);
     Ok(value)
 }
 
-pub fn mk_module(ctx: &PyContext) -> PyObjectRef {
+pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
+    let ctx = &vm.ctx;
+
     let keyword_kwlist = ctx.new_list(
         lexer::get_keywords()
             .keys()
@@ -25,7 +25,7 @@ pub fn mk_module(ctx: &PyContext) -> PyObjectRef {
             .collect(),
     );
 
-    py_module!(ctx, "keyword", {
+    py_module!(vm, "keyword", {
         "iskeyword" => ctx.new_rustfunc(keyword_iskeyword),
         "kwlist" => keyword_kwlist
     })

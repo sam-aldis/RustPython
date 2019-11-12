@@ -1,312 +1,301 @@
-use std::cell::{Cell, RefCell};
-use std::hash::{Hash, Hasher};
+use std::cell::Cell;
+use std::fmt;
 
-use super::objbool;
-use super::objint;
+use super::objiter;
 use super::objsequence::{
-    get_elements, get_item, seq_equal, seq_ge, seq_gt, seq_le, seq_lt, seq_mul,
+    get_elements_tuple, get_item, seq_equal, seq_ge, seq_gt, seq_le, seq_lt, seq_mul,
 };
-use super::objstr;
-use super::objtype;
-use crate::pyobject::{PyContext, PyFuncArgs, PyObject, PyObjectPayload, PyResult, TypeProtocol};
+use super::objtype::{self, PyClassRef};
+use crate::function::OptionalArg;
+use crate::pyhash;
+use crate::pyobject::{
+    IntoPyObject, PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue,
+};
 use crate::vm::{ReprGuard, VirtualMachine};
 
-fn tuple_lt(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(zelf, Some(vm.ctx.tuple_type())), (other, None)]
-    );
-
-    let result = if objtype::isinstance(other, &vm.ctx.tuple_type()) {
-        let zelf = get_elements(zelf);
-        let other = get_elements(other);
-        seq_lt(vm, &zelf, &other)?
-    } else {
-        return Err(vm.new_type_error(format!("Cannot compare {} and {} using '<'", zelf, other)));
-    };
-
-    Ok(vm.ctx.new_bool(result))
+/// tuple() -> empty tuple
+/// tuple(iterable) -> tuple initialized from iterable's items
+///
+/// If the argument is a tuple, the return value is the same object.
+#[pyclass]
+pub struct PyTuple {
+    // TODO: shouldn't be public
+    pub elements: Vec<PyObjectRef>,
 }
 
-fn tuple_gt(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(zelf, Some(vm.ctx.tuple_type())), (other, None)]
-    );
-
-    let result = if objtype::isinstance(other, &vm.ctx.tuple_type()) {
-        let zelf = get_elements(zelf);
-        let other = get_elements(other);
-        seq_gt(vm, &zelf, &other)?
-    } else {
-        return Err(vm.new_type_error(format!("Cannot compare {} and {} using '>'", zelf, other)));
-    };
-
-    Ok(vm.ctx.new_bool(result))
-}
-
-fn tuple_ge(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(zelf, Some(vm.ctx.tuple_type())), (other, None)]
-    );
-
-    let result = if objtype::isinstance(other, &vm.ctx.tuple_type()) {
-        let zelf = get_elements(zelf);
-        let other = get_elements(other);
-        seq_ge(vm, &zelf, &other)?
-    } else {
-        return Err(vm.new_type_error(format!("Cannot compare {} and {} using '>='", zelf, other)));
-    };
-
-    Ok(vm.ctx.new_bool(result))
-}
-
-fn tuple_le(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(zelf, Some(vm.ctx.tuple_type())), (other, None)]
-    );
-
-    let result = if objtype::isinstance(other, &vm.ctx.tuple_type()) {
-        let zelf = get_elements(zelf);
-        let other = get_elements(other);
-        seq_le(vm, &zelf, &other)?
-    } else {
-        return Err(vm.new_type_error(format!("Cannot compare {} and {} using '<='", zelf, other)));
-    };
-
-    Ok(vm.ctx.new_bool(result))
-}
-
-fn tuple_add(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(zelf, Some(vm.ctx.tuple_type())), (other, None)]
-    );
-
-    if objtype::isinstance(other, &vm.ctx.tuple_type()) {
-        let e1 = get_elements(zelf);
-        let e2 = get_elements(other);
-        let elements = e1.iter().chain(e2.iter()).cloned().collect();
-        Ok(vm.ctx.new_tuple(elements))
-    } else {
-        Err(vm.new_type_error(format!("Cannot add {} and {}", zelf, other)))
+impl fmt::Debug for PyTuple {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO: implement more informational, non-recursive Debug formatter
+        f.write_str("tuple")
     }
 }
 
-fn tuple_count(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(zelf, Some(vm.ctx.tuple_type())), (value, None)]
-    );
-    let elements = get_elements(zelf);
-    let mut count: usize = 0;
-    for element in elements.iter() {
-        let is_eq = vm._eq(element.clone(), value.clone())?;
-        if objbool::boolval(vm, is_eq)? {
-            count += 1;
-        }
+impl From<Vec<PyObjectRef>> for PyTuple {
+    fn from(elements: Vec<PyObjectRef>) -> Self {
+        PyTuple { elements }
     }
-    Ok(vm.context().new_int(count))
 }
 
-fn tuple_eq(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(zelf, Some(vm.ctx.tuple_type())), (other, None)]
-    );
-
-    let result = if objtype::isinstance(other, &vm.ctx.tuple_type()) {
-        let zelf = get_elements(zelf);
-        let other = get_elements(other);
-        seq_equal(vm, &zelf, &other)?
-    } else {
-        false
-    };
-    Ok(vm.ctx.new_bool(result))
-}
-
-fn tuple_hash(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(zelf, Some(vm.ctx.tuple_type()))]);
-    let elements = get_elements(zelf);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for element in elements.iter() {
-        let element_hash = objint::get_value(&vm.call_method(element, "__hash__", vec![])?);
-        element_hash.hash(&mut hasher);
+impl PyValue for PyTuple {
+    fn class(vm: &VirtualMachine) -> PyClassRef {
+        vm.ctx.tuple_type()
     }
-    let hash = hasher.finish();
-    Ok(vm.ctx.new_int(hash))
 }
 
-fn tuple_iter(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(tuple, Some(vm.ctx.tuple_type()))]);
-
-    let iter_obj = PyObject::new(
-        PyObjectPayload::Iterator {
-            position: Cell::new(0),
-            iterated_obj: tuple.clone(),
-        },
-        vm.ctx.iter_type(),
-    );
-
-    Ok(iter_obj)
-}
-
-fn tuple_len(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(zelf, Some(vm.ctx.tuple_type()))]);
-    let elements = get_elements(zelf);
-    Ok(vm.context().new_int(elements.len()))
-}
-
-fn tuple_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(cls, None)],
-        optional = [(iterable, None)]
-    );
-
-    if !objtype::issubclass(cls, &vm.ctx.tuple_type()) {
-        return Err(vm.new_type_error(format!("{} is not a subtype of tuple", cls)));
-    }
-
-    let elements = if let Some(iterable) = iterable {
-        vm.extract_elements(iterable)?
-    } else {
-        vec![]
-    };
-
-    Ok(PyObject::new(
-        PyObjectPayload::Sequence {
-            elements: RefCell::new(elements),
-        },
-        cls.clone(),
-    ))
-}
-
-fn tuple_repr(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(zelf, Some(vm.ctx.tuple_type()))]);
-
-    let s = if let Some(_guard) = ReprGuard::enter(zelf) {
-        let elements = get_elements(zelf);
-
-        let mut str_parts = vec![];
-        for elem in elements.iter() {
-            let s = vm.to_repr(elem)?;
-            str_parts.push(objstr::get_value(&s));
-        }
-
-        if str_parts.len() == 1 {
-            format!("({},)", str_parts[0])
-        } else {
-            format!("({})", str_parts.join(", "))
-        }
-    } else {
-        "(...)".to_string()
-    };
-    Ok(vm.new_str(s))
-}
-
-fn tuple_mul(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (zelf, Some(vm.ctx.tuple_type())),
-            (product, Some(vm.ctx.int_type()))
-        ]
-    );
-
-    let new_elements = seq_mul(&get_elements(zelf), product);
-
-    Ok(vm.ctx.new_tuple(new_elements))
-}
-
-fn tuple_getitem(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(tuple, Some(vm.ctx.tuple_type())), (needle, None)]
-    );
-    get_item(vm, tuple, &get_elements(&tuple), needle.clone())
-}
-
-pub fn tuple_index(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(tuple, Some(vm.ctx.tuple_type())), (needle, None)]
-    );
-    for (index, element) in get_elements(tuple).iter().enumerate() {
-        let py_equal = vm._eq(needle.clone(), element.clone())?;
-        if objbool::get_value(&py_equal) {
-            return Ok(vm.context().new_int(index));
-        }
-    }
-    Err(vm.new_value_error("tuple.index(x): x not in tuple".to_string()))
-}
-
-pub fn tuple_contains(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(tuple, Some(vm.ctx.tuple_type())), (needle, None)]
-    );
-    for element in get_elements(tuple).iter() {
-        match vm._eq(needle.clone(), element.clone()) {
-            Ok(value) => {
-                if objbool::get_value(&value) {
-                    return Ok(vm.new_bool(true));
-                }
+macro_rules! impl_intopyobj_tuple {
+    ($(($T:ident, $idx:tt)),+) => {
+        impl<$($T: IntoPyObject),*> IntoPyObject for ($($T,)*) {
+            fn into_pyobject(self, vm: &VirtualMachine) -> PyResult {
+                Ok(vm.ctx.new_tuple(vec![$(self.$idx.into_pyobject(vm)?),*]))
             }
-            Err(_) => return Err(vm.new_type_error("".to_string())),
+        }
+    };
+}
+
+impl_intopyobj_tuple!((A, 0));
+impl_intopyobj_tuple!((A, 0), (B, 1));
+impl_intopyobj_tuple!((A, 0), (B, 1), (C, 2));
+impl_intopyobj_tuple!((A, 0), (B, 1), (C, 2), (D, 3));
+impl_intopyobj_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4));
+impl_intopyobj_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5));
+impl_intopyobj_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5), (G, 6));
+
+impl PyTuple {
+    pub fn fast_getitem(&self, idx: usize) -> PyObjectRef {
+        self.elements[idx].clone()
+    }
+}
+
+pub type PyTupleRef = PyRef<PyTuple>;
+
+pub fn get_value(obj: &PyObjectRef) -> Vec<PyObjectRef> {
+    obj.payload::<PyTuple>().unwrap().elements.clone()
+}
+
+#[pyimpl]
+impl PyTuple {
+    #[pymethod(name = "__lt__")]
+    fn lt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if objtype::isinstance(&other, &vm.ctx.tuple_type()) {
+            let other = get_elements_tuple(&other);
+            let res = seq_lt(vm, &self.elements.as_slice(), &other.as_slice())?;
+            Ok(vm.new_bool(res))
+        } else {
+            Ok(vm.ctx.not_implemented())
         }
     }
 
-    Ok(vm.new_bool(false))
+    #[pymethod(name = "__gt__")]
+    fn gt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if objtype::isinstance(&other, &vm.ctx.tuple_type()) {
+            let other = get_elements_tuple(&other);
+            let res = seq_gt(vm, &self.elements.as_slice(), &other.as_slice())?;
+            Ok(vm.new_bool(res))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    #[pymethod(name = "__ge__")]
+    fn ge(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if objtype::isinstance(&other, &vm.ctx.tuple_type()) {
+            let other = get_elements_tuple(&other);
+            let res = seq_ge(vm, &self.elements.as_slice(), &other.as_slice())?;
+            Ok(vm.new_bool(res))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    #[pymethod(name = "__le__")]
+    fn le(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if objtype::isinstance(&other, &vm.ctx.tuple_type()) {
+            let other = get_elements_tuple(&other);
+            let res = seq_le(vm, &self.elements.as_slice(), &other.as_slice())?;
+            Ok(vm.new_bool(res))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    #[pymethod(name = "__add__")]
+    fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if objtype::isinstance(&other, &vm.ctx.tuple_type()) {
+            let e2 = get_elements_tuple(&other);
+            let elements = self.elements.iter().chain(e2.iter()).cloned().collect();
+            Ok(vm.ctx.new_tuple(elements))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    #[pymethod(name = "__bool__")]
+    fn bool(&self, _vm: &VirtualMachine) -> bool {
+        !self.elements.is_empty()
+    }
+
+    #[pymethod(name = "count")]
+    fn count(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
+        let mut count: usize = 0;
+        for element in self.elements.iter() {
+            if vm.identical_or_equal(element, &needle)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    #[pymethod(name = "__eq__")]
+    fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if objtype::isinstance(&other, &vm.ctx.tuple_type()) {
+            Ok(vm.new_bool(self.inner_eq(&other, vm)?))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    #[pymethod(name = "__ne__")]
+    fn ne(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if objtype::isinstance(&other, &vm.ctx.tuple_type()) {
+            Ok(vm.new_bool(!self.inner_eq(&other, vm)?))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    fn inner_eq(&self, other: &PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
+        let other = get_elements_tuple(other);
+        seq_equal(vm, &self.elements.as_slice(), &other.as_slice())
+    }
+
+    #[pymethod(name = "__hash__")]
+    fn hash(&self, vm: &VirtualMachine) -> PyResult<pyhash::PyHash> {
+        pyhash::hash_iter(self.elements.iter(), vm)
+    }
+
+    #[pymethod(name = "__iter__")]
+    fn iter(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyTupleIterator {
+        PyTupleIterator {
+            position: Cell::new(0),
+            tuple: zelf,
+        }
+    }
+
+    #[pymethod(name = "__len__")]
+    fn len(&self, _vm: &VirtualMachine) -> usize {
+        self.elements.len()
+    }
+
+    #[pymethod(name = "__repr__")]
+    fn repr(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<String> {
+        let s = if let Some(_guard) = ReprGuard::enter(zelf.as_object()) {
+            let mut str_parts = Vec::with_capacity(zelf.elements.len());
+            for elem in zelf.elements.iter() {
+                let s = vm.to_repr(elem)?;
+                str_parts.push(s.as_str().to_owned());
+            }
+
+            if str_parts.len() == 1 {
+                format!("({},)", str_parts[0])
+            } else {
+                format!("({})", str_parts.join(", "))
+            }
+        } else {
+            "(...)".to_string()
+        };
+        Ok(s)
+    }
+
+    #[pymethod(name = "__mul__")]
+    fn mul(&self, counter: isize, vm: &VirtualMachine) -> PyObjectRef {
+        let new_elements = seq_mul(&self.elements.as_slice(), counter)
+            .cloned()
+            .collect();
+        vm.ctx.new_tuple(new_elements)
+    }
+
+    #[pymethod(name = "__rmul__")]
+    fn rmul(&self, counter: isize, vm: &VirtualMachine) -> PyObjectRef {
+        self.mul(counter, vm)
+    }
+
+    #[pymethod(name = "__getitem__")]
+    fn getitem(zelf: PyRef<Self>, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        get_item(vm, zelf.as_object(), &zelf.elements, needle.clone())
+    }
+
+    #[pymethod(name = "index")]
+    fn index(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<usize> {
+        for (index, element) in self.elements.iter().enumerate() {
+            if vm.identical_or_equal(element, &needle)? {
+                return Ok(index);
+            }
+        }
+        Err(vm.new_value_error("tuple.index(x): x not in tuple".to_string()))
+    }
+
+    #[pymethod(name = "__contains__")]
+    fn contains(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
+        for element in self.elements.iter() {
+            if vm.identical_or_equal(element, &needle)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    #[pyslot(new)]
+    fn tuple_new(
+        cls: PyClassRef,
+        iterable: OptionalArg<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyTupleRef> {
+        let elements = if let OptionalArg::Present(iterable) = iterable {
+            vm.extract_elements(&iterable)?
+        } else {
+            vec![]
+        };
+
+        PyTuple::from(elements).into_ref_with_type(vm, cls)
+    }
 }
 
-pub fn init(context: &PyContext) {
-    let tuple_type = &context.tuple_type;
-    let tuple_doc = "tuple() -> empty tuple
-tuple(iterable) -> tuple initialized from iterable's items
+#[pyclass]
+#[derive(Debug)]
+pub struct PyTupleIterator {
+    position: Cell<usize>,
+    tuple: PyTupleRef,
+}
 
-If the argument is a tuple, the return value is the same object.";
-    context.set_attr(&tuple_type, "__add__", context.new_rustfunc(tuple_add));
-    context.set_attr(&tuple_type, "__eq__", context.new_rustfunc(tuple_eq));
-    context.set_attr(
-        &tuple_type,
-        "__contains__",
-        context.new_rustfunc(tuple_contains),
-    );
-    context.set_attr(
-        &tuple_type,
-        "__getitem__",
-        context.new_rustfunc(tuple_getitem),
-    );
-    context.set_attr(&tuple_type, "__hash__", context.new_rustfunc(tuple_hash));
-    context.set_attr(&tuple_type, "__iter__", context.new_rustfunc(tuple_iter));
-    context.set_attr(&tuple_type, "__len__", context.new_rustfunc(tuple_len));
-    context.set_attr(&tuple_type, "__new__", context.new_rustfunc(tuple_new));
-    context.set_attr(&tuple_type, "__mul__", context.new_rustfunc(tuple_mul));
-    context.set_attr(&tuple_type, "__repr__", context.new_rustfunc(tuple_repr));
-    context.set_attr(&tuple_type, "count", context.new_rustfunc(tuple_count));
-    context.set_attr(&tuple_type, "__lt__", context.new_rustfunc(tuple_lt));
-    context.set_attr(&tuple_type, "__le__", context.new_rustfunc(tuple_le));
-    context.set_attr(&tuple_type, "__gt__", context.new_rustfunc(tuple_gt));
-    context.set_attr(&tuple_type, "__ge__", context.new_rustfunc(tuple_ge));
-    context.set_attr(
-        &tuple_type,
-        "__doc__",
-        context.new_str(tuple_doc.to_string()),
-    );
-    context.set_attr(&tuple_type, "index", context.new_rustfunc(tuple_index));
+impl PyValue for PyTupleIterator {
+    fn class(vm: &VirtualMachine) -> PyClassRef {
+        vm.ctx.tupleiterator_type()
+    }
+}
+
+#[pyimpl]
+impl PyTupleIterator {
+    #[pymethod(name = "__next__")]
+    fn next(&self, vm: &VirtualMachine) -> PyResult {
+        if self.position.get() < self.tuple.elements.len() {
+            let ret = self.tuple.elements[self.position.get()].clone();
+            self.position.set(self.position.get() + 1);
+            Ok(ret)
+        } else {
+            Err(objiter::new_stop_iteration(vm))
+        }
+    }
+
+    #[pymethod(name = "__iter__")]
+    fn iter(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyRef<Self> {
+        zelf
+    }
+}
+
+#[rustfmt::skip] // to avoid line splitting
+pub fn init(context: &PyContext) {
+    let tuple_type = &context.types.tuple_type;
+    PyTuple::extend_class(context, tuple_type);
+
+    PyTupleIterator::extend_class(context, &context.types.tupleiterator_type);
 }

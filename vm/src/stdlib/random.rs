@@ -1,53 +1,40 @@
 //! Random module.
 
-extern crate rand;
+use rand::distributions::Distribution;
+use rand_distr::Normal;
 
-use crate::obj::objfloat;
-use crate::pyobject::{PyContext, PyFuncArgs, PyObjectRef, PyResult, TypeProtocol};
-use crate::stdlib::random::rand::distributions::{Distribution, Normal};
-use crate::VirtualMachine;
+use crate::pyobject::{PyObjectRef, PyResult};
+use crate::vm::VirtualMachine;
 
-pub fn mk_module(ctx: &PyContext) -> PyObjectRef {
-    py_module!(ctx, "random", {
-        "guass" => ctx.new_rustfunc(random_gauss),
+pub fn make_module(vm: &VirtualMachine) -> PyObjectRef {
+    let ctx = &vm.ctx;
+
+    py_module!(vm, "random", {
+        "gauss" => ctx.new_rustfunc(random_normalvariate), // TODO: is this the same?
         "normalvariate" => ctx.new_rustfunc(random_normalvariate),
         "random" => ctx.new_rustfunc(random_random),
         // "weibull", ctx.new_rustfunc(random_weibullvariate),
     })
 }
 
-fn random_gauss(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    // TODO: is this the same?
-    random_normalvariate(vm, args)
-}
-
-fn random_normalvariate(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (mu, Some(vm.ctx.float_type())),
-            (sigma, Some(vm.ctx.float_type()))
-        ]
-    );
-    let mu = objfloat::get_value(mu);
-    let sigma = objfloat::get_value(sigma);
-    let normal = Normal::new(mu, sigma);
+fn random_normalvariate(mu: f64, sigma: f64, vm: &VirtualMachine) -> PyResult<f64> {
+    let normal = Normal::new(mu, sigma).map_err(|rand_err| {
+        vm.new_exception(
+            vm.ctx.exceptions.arithmetic_error.clone(),
+            format!("invalid normal distribution: {:?}", rand_err),
+        )
+    })?;
     let value = normal.sample(&mut rand::thread_rng());
-    let py_value = vm.ctx.new_float(value);
-    Ok(py_value)
+    Ok(value)
 }
 
-fn random_random(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args);
-    let value = rand::random::<f64>();
-    let py_value = vm.ctx.new_float(value);
-    Ok(py_value)
+fn random_random(_vm: &VirtualMachine) -> f64 {
+    rand::random()
 }
 
 /*
  * TODO: enable this function:
-fn random_weibullvariate(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
+fn random_weibullvariate(vm: &VirtualMachine, args: PyFuncArgs) -> PyResult {
     arg_check!(vm, args, required = [(alpha, Some(vm.ctx.float_type())), (beta, Some(vm.ctx.float_type()))]);
     let alpha = objfloat::get_value(alpha);
     let beta = objfloat::get_value(beta);

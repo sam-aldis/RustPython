@@ -1,22 +1,72 @@
-use crate::pyobject::{PyContext, PyFuncArgs, PyObject, PyObjectPayload, PyResult, TypeProtocol};
+use std::borrow::Borrow;
+
+use super::objbyteinner::try_as_byte;
+use super::objtype::{issubclass, PyClassRef};
+use crate::pyobject::{PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue};
+use crate::stdlib::array::PyArray;
 use crate::vm::VirtualMachine;
 
-pub fn new_memory_view(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(cls, None), (bytes_object, None)]);
-    vm.ctx.set_attr(&cls, "obj", bytes_object.clone());
-    Ok(PyObject::new(
-        PyObjectPayload::MemoryView {
-            obj: bytes_object.clone(),
-        },
-        cls.clone(),
-    ))
+#[pyclass(name = "memoryview")]
+#[derive(Debug)]
+pub struct PyMemoryView {
+    obj_ref: PyObjectRef,
+}
+
+pub type PyMemoryViewRef = PyRef<PyMemoryView>;
+
+#[pyimpl]
+impl PyMemoryView {
+    pub fn get_obj_value(&self) -> Option<Vec<u8>> {
+        try_as_byte(&self.obj_ref)
+    }
+
+    #[pyslot(new)]
+    fn tp_new(
+        cls: PyClassRef,
+        bytes_object: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyMemoryViewRef> {
+        let object_type = bytes_object.typ.borrow();
+
+        if issubclass(object_type, &vm.ctx.types.memoryview_type)
+            || issubclass(object_type, &vm.ctx.types.bytes_type)
+            || issubclass(object_type, &vm.ctx.types.bytearray_type)
+            || issubclass(object_type, &PyArray::class(vm))
+        {
+            PyMemoryView {
+                obj_ref: bytes_object.clone(),
+            }
+            .into_ref_with_type(vm, cls)
+        } else {
+            Err(vm.new_type_error(format!(
+                "memoryview: a bytes-like object is required, not '{}'",
+                object_type.name
+            )))
+        }
+    }
+
+    #[pyproperty]
+    fn obj(&self, __vm: &VirtualMachine) -> PyObjectRef {
+        self.obj_ref.clone()
+    }
+
+    #[pymethod(name = "__hash__")]
+    fn hash(&self, vm: &VirtualMachine) -> PyResult {
+        vm.call_method(&self.obj_ref, "__hash__", vec![])
+    }
+
+    #[pymethod(name = "__getitem__")]
+    fn getitem(&self, needle: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        vm.call_method(&self.obj_ref, "__getitem__", vec![needle])
+    }
+}
+
+impl PyValue for PyMemoryView {
+    fn class(vm: &VirtualMachine) -> PyClassRef {
+        vm.ctx.memoryview_type()
+    }
 }
 
 pub fn init(ctx: &PyContext) {
-    let memoryview_type = &ctx.memoryview_type;
-    ctx.set_attr(
-        &memoryview_type,
-        "__new__",
-        ctx.new_rustfunc(new_memory_view),
-    );
+    PyMemoryView::extend_class(ctx, &ctx.types.memoryview_type)
 }

@@ -4,34 +4,19 @@
 //! desktop.
 //! Implements functions listed here: https://docs.python.org/3/library/builtins.html.
 
-use crate::convert;
 use js_sys::{self, Array};
+use web_sys::{self, console};
+
+use rustpython_vm::function::PyFuncArgs;
 use rustpython_vm::obj::{objstr, objtype};
-use rustpython_vm::pyobject::{IdProtocol, PyFuncArgs, PyObjectRef, PyResult, TypeProtocol};
+use rustpython_vm::pyobject::{IdProtocol, PyResult, TypeProtocol};
 use rustpython_vm::VirtualMachine;
-use wasm_bindgen::{prelude::*, JsCast};
-use web_sys::{self, console, HtmlTextAreaElement};
 
 pub(crate) fn window() -> web_sys::Window {
     web_sys::window().expect("Window to be available")
 }
 
-// The HTML id of the textarea element that act as our STDOUT
-
-pub fn print_to_html(text: &str, selector: &str) -> Result<(), JsValue> {
-    let document = window().document().expect("Document to be available");
-    let element = document
-        .query_selector(selector)?
-        .ok_or_else(|| js_sys::TypeError::new("Couldn't get element"))?;
-    let textarea = element
-        .dyn_ref::<HtmlTextAreaElement>()
-        .ok_or_else(|| js_sys::TypeError::new("Element must be a textarea"))?;
-    let value = textarea.value();
-    textarea.set_value(&format!("{}{}", value, text));
-    Ok(())
-}
-
-pub fn format_print_args(vm: &mut VirtualMachine, args: PyFuncArgs) -> Result<String, PyObjectRef> {
+pub fn format_print_args(vm: &VirtualMachine, args: PyFuncArgs) -> PyResult<String> {
     // Handle 'sep' kwarg:
     let sep_arg = args
         .get_optional_kwarg("sep")
@@ -40,7 +25,7 @@ pub fn format_print_args(vm: &mut VirtualMachine, args: PyFuncArgs) -> Result<St
         if !objtype::isinstance(obj, &vm.ctx.str_type()) {
             return Err(vm.new_type_error(format!(
                 "sep must be None or a string, not {}",
-                objtype::get_type_name(&obj.typ())
+                obj.class().name
             )));
         }
     }
@@ -54,7 +39,7 @@ pub fn format_print_args(vm: &mut VirtualMachine, args: PyFuncArgs) -> Result<St
         if !objtype::isinstance(obj, &vm.ctx.str_type()) {
             return Err(vm.new_type_error(format!(
                 "end must be None or a string, not {}",
-                objtype::get_type_name(&obj.typ())
+                obj.class().name
             )));
         }
     }
@@ -83,13 +68,7 @@ pub fn format_print_args(vm: &mut VirtualMachine, args: PyFuncArgs) -> Result<St
     Ok(output)
 }
 
-pub fn builtin_print_html(vm: &mut VirtualMachine, args: PyFuncArgs, selector: &str) -> PyResult {
-    let output = format_print_args(vm, args)?;
-    print_to_html(&output, selector).map_err(|err| convert::js_to_py(vm, err))?;
-    Ok(vm.get_none())
-}
-
-pub fn builtin_print_console(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
+pub fn builtin_print_console(vm: &VirtualMachine, args: PyFuncArgs) -> PyResult {
     let arr = Array::new();
     for arg in args.args {
         arr.push(&vm.to_pystr(&arg)?.into());

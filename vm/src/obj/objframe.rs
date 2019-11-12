@@ -2,52 +2,51 @@
 
 */
 
-use crate::frame::Frame;
-use crate::pyobject::{
-    PyContext, PyFuncArgs, PyObjectPayload, PyObjectRef, PyResult, TypeProtocol,
-};
+use super::objcode::PyCodeRef;
+use super::objdict::PyDictRef;
+use crate::frame::FrameRef;
+use crate::pyobject::{PyClassImpl, PyContext, PyObjectRef, PyResult};
 use crate::vm::VirtualMachine;
 
 pub fn init(context: &PyContext) {
-    let frame_type = &context.frame_type;
-    context.set_attr(&frame_type, "__new__", context.new_rustfunc(frame_new));
-    context.set_attr(&frame_type, "__repr__", context.new_rustfunc(frame_repr));
-    context.set_attr(&frame_type, "f_locals", context.new_property(frame_flocals));
-    context.set_attr(&frame_type, "f_code", context.new_property(frame_fcode));
+    FrameRef::extend_class(context, &context.types.frame_type);
 }
 
-fn frame_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(_cls, None)]);
-    Err(vm.new_type_error("Cannot directly create frame object".to_string()))
-}
-
-fn frame_repr(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(_frame, Some(vm.ctx.frame_type()))]);
-    let repr = "<frame object at .. >".to_string();
-    Ok(vm.new_str(repr))
-}
-
-fn frame_flocals(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(frame, Some(vm.ctx.frame_type()))]);
-    let frame = get_value(frame);
-    let py_scope = frame.locals.clone();
-
-    if let PyObjectPayload::Scope { scope } = &py_scope.payload {
-        Ok(scope.borrow().locals.clone())
-    } else {
-        panic!("The scope isn't a scope!");
+#[pyimpl]
+impl FrameRef {
+    #[pyslot(new)]
+    fn tp_new(_cls: FrameRef, vm: &VirtualMachine) -> PyResult<Self> {
+        Err(vm.new_type_error("Cannot directly create frame object".to_string()))
     }
-}
 
-fn frame_fcode(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(frame, Some(vm.ctx.frame_type()))]);
-    Ok(vm.ctx.new_code_object(get_value(frame).code))
-}
+    #[pymethod(name = "__repr__")]
+    fn repr(self, _vm: &VirtualMachine) -> String {
+        "<frame object at .. >".to_string()
+    }
 
-pub fn get_value(obj: &PyObjectRef) -> Frame {
-    if let PyObjectPayload::Frame { frame } = &obj.payload {
-        frame.clone()
-    } else {
-        panic!("Inner error getting int {:?}", obj);
+    #[pyproperty]
+    fn f_globals(self, _vm: &VirtualMachine) -> PyDictRef {
+        self.scope.globals.clone()
+    }
+
+    #[pyproperty]
+    fn f_locals(self, _vm: &VirtualMachine) -> PyDictRef {
+        self.scope.get_locals()
+    }
+
+    #[pyproperty]
+    fn f_code(self, _vm: &VirtualMachine) -> PyCodeRef {
+        self.code.clone()
+    }
+
+    #[pyproperty]
+    fn f_back(self, vm: &VirtualMachine) -> PyObjectRef {
+        // TODO: how to retrieve the upper stack frame??
+        vm.ctx.none()
+    }
+
+    #[pyproperty]
+    fn f_lasti(self, vm: &VirtualMachine) -> PyObjectRef {
+        vm.ctx.new_int(self.lasti.get())
     }
 }

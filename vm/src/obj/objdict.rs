@@ -1,348 +1,622 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
+use std::fmt;
 
 use super::objiter;
 use super::objstr;
-use super::objtype;
+use super::objtype::{self, PyClassRef};
+use crate::dictdatatype::{self, DictKey};
+use crate::function::{KwArgs, OptionalArg};
 use crate::pyobject::{
-    PyAttributes, PyContext, PyFuncArgs, PyObject, PyObjectPayload, PyObjectRef, PyResult,
-    TypeProtocol,
+    IdProtocol, IntoPyObject, ItemProtocol, PyAttributes, PyClassImpl, PyContext, PyIterable,
+    PyObjectRef, PyRef, PyResult, PyValue,
 };
 use crate::vm::{ReprGuard, VirtualMachine};
 
-// This typedef abstracts the actual dict type used.
-// pub type DictContentType = HashMap<usize, Vec<(PyObjectRef, PyObjectRef)>>;
-// pub type DictContentType = HashMap<String, PyObjectRef>;
-pub type DictContentType = HashMap<String, (PyObjectRef, PyObjectRef)>;
-// pub type DictContentType = HashMap<String, Vec<(PyObjectRef, PyObjectRef)>>;
+use std::mem::size_of;
 
-pub fn new(dict_type: PyObjectRef) -> PyObjectRef {
-    PyObject::new(
-        PyObjectPayload::Dict {
-            elements: RefCell::new(HashMap::new()),
-        },
-        dict_type.clone(),
-    )
+pub type DictContentType = dictdatatype::Dict;
+
+#[derive(Default)]
+pub struct PyDict {
+    entries: RefCell<DictContentType>,
 }
+pub type PyDictRef = PyRef<PyDict>;
 
-pub fn get_elements<'a>(obj: &'a PyObjectRef) -> impl Deref<Target = DictContentType> + 'a {
-    if let PyObjectPayload::Dict { ref elements } = obj.payload {
-        elements.borrow()
-    } else {
-        panic!("Cannot extract dict elements");
+impl fmt::Debug for PyDict {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO: implement more detailed, non-recursive Debug formatter
+        f.write_str("dict")
     }
 }
 
-fn get_mut_elements<'a>(obj: &'a PyObjectRef) -> impl DerefMut<Target = DictContentType> + 'a {
-    if let PyObjectPayload::Dict { ref elements } = obj.payload {
-        elements.borrow_mut()
-    } else {
-        panic!("Cannot extract dict elements");
+impl PyValue for PyDict {
+    fn class(vm: &VirtualMachine) -> PyClassRef {
+        vm.ctx.dict_type()
     }
-}
-
-pub fn set_item(
-    dict: &PyObjectRef,
-    _vm: &mut VirtualMachine,
-    needle: &PyObjectRef,
-    value: &PyObjectRef,
-) {
-    // TODO: use vm to call eventual __hash__ and __eq__methods.
-    let mut elements = get_mut_elements(dict);
-    set_item_in_content(&mut elements, needle, value);
-}
-
-pub fn set_item_in_content(
-    elements: &mut DictContentType,
-    needle: &PyObjectRef,
-    value: &PyObjectRef,
-) {
-    // XXX: Currently, we only support String keys, so we have to unwrap the
-    // PyObject (and ensure it is a String).
-
-    // TODO: invoke __hash__ function here!
-    let needle_str = objstr::get_value(needle);
-    elements.insert(needle_str, (needle.clone(), value.clone()));
-}
-
-pub fn get_key_value_pairs(dict: &PyObjectRef) -> Vec<(PyObjectRef, PyObjectRef)> {
-    let dict_elements = get_elements(dict);
-    get_key_value_pairs_from_content(&dict_elements)
-}
-
-pub fn get_key_value_pairs_from_content(
-    dict_content: &DictContentType,
-) -> Vec<(PyObjectRef, PyObjectRef)> {
-    let mut pairs: Vec<(PyObjectRef, PyObjectRef)> = Vec::new();
-    for (_str_key, pair) in dict_content.iter() {
-        let (key, obj) = pair;
-        pairs.push((key.clone(), obj.clone()));
-    }
-    pairs
-}
-
-pub fn get_item(dict: &PyObjectRef, key: &PyObjectRef) -> Option<PyObjectRef> {
-    let needle_str = objstr::get_value(key);
-    get_key_str(dict, &needle_str)
-}
-
-// Special case for the case when requesting a str key from a dict:
-pub fn get_key_str(dict: &PyObjectRef, key: &str) -> Option<PyObjectRef> {
-    let elements = get_elements(dict);
-    content_get_key_str(&elements, key)
-}
-
-/// Retrieve a key from dict contents:
-pub fn content_get_key_str(elements: &DictContentType, key: &str) -> Option<PyObjectRef> {
-    // TODO: let hash: usize = key;
-    match elements.get(key) {
-        Some(v) => Some(v.1.clone()),
-        None => None,
-    }
-}
-
-pub fn contains_key_str(dict: &PyObjectRef, key: &str) -> bool {
-    let elements = get_elements(dict);
-    content_contains_key_str(&elements, key)
-}
-
-pub fn content_contains_key_str(elements: &DictContentType, key: &str) -> bool {
-    // TODO: let hash: usize = key;
-    elements.get(key).is_some()
-}
-
-/// Take a python dictionary and convert it to attributes.
-pub fn py_dict_to_attributes(dict: &PyObjectRef) -> PyAttributes {
-    let mut attrs = PyAttributes::new();
-    for (key, value) in get_key_value_pairs(dict) {
-        let key = objstr::get_value(&key);
-        attrs.insert(key, value);
-    }
-    attrs
-}
-
-pub fn attributes_to_py_dict(vm: &mut VirtualMachine, attributes: PyAttributes) -> PyResult {
-    let dict = vm.ctx.new_dict();
-    for (key, value) in attributes {
-        let key = vm.ctx.new_str(key);
-        set_item(&dict, vm, &key, &value);
-    }
-    Ok(dict)
 }
 
 // Python dict methods:
+impl PyDictRef {
+    fn new(
+        class: PyClassRef,
+        dict_obj: OptionalArg<PyObjectRef>,
+        kwargs: KwArgs,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyDictRef> {
+        let dict = DictContentType::default();
 
-fn dict_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(_ty, Some(vm.ctx.type_type()))],
-        optional = [(dict_obj, None)]
-    );
-    let dict = vm.ctx.new_dict();
-    if let Some(dict_obj) = dict_obj {
-        if objtype::isinstance(&dict_obj, &vm.ctx.dict_type()) {
-            for (needle, value) in get_key_value_pairs(&dict_obj) {
-                set_item(&dict, vm, &needle, &value);
+        let entries = RefCell::new(dict);
+        // it's unfortunate that we can't abstract over RefCall, as we should be able to use dict
+        // directly here, but that would require generic associated types
+        PyDictRef::merge(&entries, dict_obj, kwargs, vm)?;
+
+        PyDict { entries }.into_ref_with_type(vm, class)
+    }
+
+    fn merge(
+        dict: &RefCell<DictContentType>,
+        dict_obj: OptionalArg<PyObjectRef>,
+        kwargs: KwArgs,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
+        if let OptionalArg::Present(dict_obj) = dict_obj {
+            let dicted: PyResult<PyDictRef> = dict_obj.clone().downcast();
+            if let Ok(dict_obj) = dicted {
+                for (key, value) in dict_obj {
+                    dict.borrow_mut().insert(vm, &key, value)?;
+                }
+            } else if let Some(keys) = vm.get_method(dict_obj.clone(), "keys") {
+                let keys = objiter::get_iter(vm, &vm.invoke(&keys?, vec![])?)?;
+                while let Some(key) = objiter::get_next_object(vm, &keys)? {
+                    let val = dict_obj.get_item(&key, vm)?;
+                    dict.borrow_mut().insert(vm, &key, val)?;
+                }
+            } else {
+                let iter = objiter::get_iter(vm, &dict_obj)?;
+                loop {
+                    fn err(vm: &VirtualMachine) -> PyObjectRef {
+                        vm.new_type_error("Iterator must have exactly two elements".to_string())
+                    }
+                    let element = match objiter::get_next_object(vm, &iter)? {
+                        Some(obj) => obj,
+                        None => break,
+                    };
+                    let elem_iter = objiter::get_iter(vm, &element)?;
+                    let key = objiter::get_next_object(vm, &elem_iter)?.ok_or_else(|| err(vm))?;
+                    let value = objiter::get_next_object(vm, &elem_iter)?.ok_or_else(|| err(vm))?;
+                    if objiter::get_next_object(vm, &elem_iter)?.is_some() {
+                        return Err(err(vm));
+                    }
+                    dict.borrow_mut().insert(vm, &key, value)?;
+                }
+            }
+        }
+
+        let mut dict_borrowed = dict.borrow_mut();
+        for (key, value) in kwargs.into_iter() {
+            dict_borrowed.insert(vm, &vm.new_str(key), value)?;
+        }
+        Ok(())
+    }
+
+    fn fromkeys(
+        class: PyClassRef,
+        iterable: PyIterable,
+        value: OptionalArg<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyDictRef> {
+        let mut dict = DictContentType::default();
+        let value = value.unwrap_or_else(|| vm.ctx.none());
+        for elem in iterable.iter(vm)? {
+            let elem = elem?;
+            dict.insert(vm, &elem, value.clone())?;
+        }
+        let entries = RefCell::new(dict);
+        PyDict { entries }.into_ref_with_type(vm, class)
+    }
+
+    fn bool(self, _vm: &VirtualMachine) -> bool {
+        !self.entries.borrow().is_empty()
+    }
+
+    fn inner_eq(self, other: &PyDict, vm: &VirtualMachine) -> PyResult<bool> {
+        if other.entries.borrow().len() != self.entries.borrow().len() {
+            return Ok(false);
+        }
+        for (k, v1) in self {
+            match other.entries.borrow().get(vm, &k)? {
+                Some(v2) => {
+                    if v1.is(&v2) {
+                        continue;
+                    }
+                    if !vm.bool_eq(v1, v2)? {
+                        return Ok(false);
+                    }
+                }
+                None => {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn eq(self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if let Some(other) = other.payload::<PyDict>() {
+            let eq = self.inner_eq(other, vm)?;
+            Ok(vm.ctx.new_bool(eq))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    fn ne(self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if let Some(other) = other.payload::<PyDict>() {
+            let neq = !self.inner_eq(other, vm)?;
+            Ok(vm.ctx.new_bool(neq))
+        } else {
+            Ok(vm.ctx.not_implemented())
+        }
+    }
+
+    fn len(self, _vm: &VirtualMachine) -> usize {
+        self.entries.borrow().len()
+    }
+
+    fn sizeof(self, _vm: &VirtualMachine) -> usize {
+        size_of::<Self>() + self.entries.borrow().sizeof()
+    }
+
+    fn repr(self, vm: &VirtualMachine) -> PyResult<String> {
+        let s = if let Some(_guard) = ReprGuard::enter(self.as_object()) {
+            let mut str_parts = vec![];
+            for (key, value) in self {
+                let key_repr = vm.to_repr(&key)?;
+                let value_repr = vm.to_repr(&value)?;
+                str_parts.push(format!("{}: {}", key_repr.as_str(), value_repr.as_str()));
+            }
+
+            format!("{{{}}}", str_parts.join(", "))
+        } else {
+            "{...}".to_string()
+        };
+        Ok(s)
+    }
+
+    fn contains(self, key: PyObjectRef, vm: &VirtualMachine) -> PyResult<bool> {
+        self.entries.borrow().contains(vm, &key)
+    }
+
+    fn inner_delitem(self, key: PyObjectRef, vm: &VirtualMachine) -> PyResult<()> {
+        self.entries.borrow_mut().delete(vm, &key)
+    }
+
+    fn clear(self, _vm: &VirtualMachine) {
+        self.entries.borrow_mut().clear()
+    }
+
+    fn iter(self, _vm: &VirtualMachine) -> PyDictKeyIterator {
+        PyDictKeyIterator::new(self)
+    }
+
+    fn keys(self, _vm: &VirtualMachine) -> PyDictKeys {
+        PyDictKeys::new(self)
+    }
+
+    fn values(self, _vm: &VirtualMachine) -> PyDictValues {
+        PyDictValues::new(self)
+    }
+
+    fn items(self, _vm: &VirtualMachine) -> PyDictItems {
+        PyDictItems::new(self)
+    }
+
+    fn inner_setitem(
+        self,
+        key: PyObjectRef,
+        value: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
+        self.inner_setitem_fast(&key, value, vm)
+    }
+
+    /// Set item variant which can be called with multiple
+    /// key types, such as str to name a notable one.
+    fn inner_setitem_fast<K: DictKey + IntoPyObject + Copy>(
+        &self,
+        key: K,
+        value: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
+        self.entries.borrow_mut().insert(vm, key, value)
+    }
+
+    #[cfg_attr(feature = "flame-it", flame("PyDictRef"))]
+    fn inner_getitem(self, key: PyObjectRef, vm: &VirtualMachine) -> PyResult {
+        if let Some(value) = self.inner_getitem_option(&key, vm)? {
+            Ok(value)
+        } else {
+            Err(vm.new_key_error(key.clone()))
+        }
+    }
+
+    /// Return an optional inner item, or an error (can be key error as well)
+    fn inner_getitem_option<K: DictKey + IntoPyObject + Copy>(
+        &self,
+        key: K,
+        vm: &VirtualMachine,
+    ) -> PyResult<Option<PyObjectRef>> {
+        if let Some(value) = self.entries.borrow().get(vm, key)? {
+            return Ok(Some(value));
+        }
+
+        if let Some(method_or_err) = vm.get_method(self.clone().into_object(), "__missing__") {
+            let method = method_or_err?;
+            Ok(Some(vm.invoke(&method, vec![key.into_pyobject(vm)?])?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get(
+        self,
+        key: PyObjectRef,
+        default: OptionalArg<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        match self.entries.borrow().get(vm, &key)? {
+            Some(value) => Ok(value),
+            None => Ok(default.unwrap_or_else(|| vm.ctx.none())),
+        }
+    }
+
+    fn setdefault(
+        self,
+        key: PyObjectRef,
+        default: OptionalArg<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        let mut entries = self.entries.borrow_mut();
+        match entries.get(vm, &key)? {
+            Some(value) => Ok(value),
+            None => {
+                let set_value = default.unwrap_or_else(|| vm.ctx.none());
+                entries.insert(vm, &key, set_value.clone())?;
+                Ok(set_value)
+            }
+        }
+    }
+
+    pub fn copy(self, _vm: &VirtualMachine) -> PyDict {
+        PyDict {
+            entries: self.entries.clone(),
+        }
+    }
+
+    fn update(
+        self,
+        dict_obj: OptionalArg<PyObjectRef>,
+        kwargs: KwArgs,
+        vm: &VirtualMachine,
+    ) -> PyResult<()> {
+        PyDictRef::merge(&self.entries, dict_obj, kwargs, vm)
+    }
+
+    fn pop(
+        self,
+        key: PyObjectRef,
+        default: OptionalArg<PyObjectRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        match self.entries.borrow_mut().pop(vm, &key)? {
+            Some(value) => Ok(value),
+            None => match default {
+                OptionalArg::Present(default) => Ok(default),
+                OptionalArg::Missing => Err(vm.new_key_error(key.clone())),
+            },
+        }
+    }
+
+    fn popitem(self, vm: &VirtualMachine) -> PyResult {
+        let mut entries = self.entries.borrow_mut();
+        if let Some((key, value)) = entries.pop_front() {
+            Ok(vm.ctx.new_tuple(vec![key, value]))
+        } else {
+            let err_msg = vm.new_str("popitem(): dictionary is empty".to_string());
+            Err(vm.new_key_error(err_msg))
+        }
+    }
+
+    /// Take a python dictionary and convert it to attributes.
+    pub fn to_attributes(self) -> PyAttributes {
+        let mut attrs = PyAttributes::new();
+        for (key, value) in self {
+            let key = objstr::get_value(&key);
+            attrs.insert(key, value);
+        }
+        attrs
+    }
+
+    pub fn from_attributes(attrs: PyAttributes, vm: &VirtualMachine) -> PyResult<Self> {
+        let mut dict = DictContentType::default();
+
+        for (key, value) in attrs {
+            dict.insert(vm, &vm.ctx.new_str(key), value)?;
+        }
+
+        let entries = RefCell::new(dict);
+        Ok(PyDict { entries }.into_ref(vm))
+    }
+
+    fn hash(self, vm: &VirtualMachine) -> PyResult<()> {
+        Err(vm.new_type_error("unhashable type".to_string()))
+    }
+
+    pub fn contains_key<T: IntoPyObject>(&self, key: T, vm: &VirtualMachine) -> bool {
+        let key = key.into_pyobject(vm).unwrap();
+        self.entries.borrow().contains(vm, &key).unwrap()
+    }
+
+    pub fn size(&self) -> dictdatatype::DictSize {
+        self.entries.borrow().size()
+    }
+
+    /// This function can be used to get an item without raising the
+    /// KeyError, so we can simply check upon the result being Some
+    /// python value, or None.
+    /// Note that we can pass any type which implements the DictKey
+    /// trait. Notable examples are String and PyObjectRef.
+    pub fn get_item_option<T: IntoPyObject + DictKey + Copy>(
+        &self,
+        key: T,
+        vm: &VirtualMachine,
+    ) -> PyResult<Option<PyObjectRef>> {
+        // Test if this object is a true dict, or mabye a subclass?
+        // If it is a dict, we can directly invoke inner_get_item_option,
+        // and prevent the creation of the KeyError exception.
+        // Also note, that we prevent the creation of a full PyString object
+        // if we lookup local names (which happens all of the time).
+        if self.typ().is(&vm.ctx.dict_type()) {
+            // We can take the short path here!
+            match self.inner_getitem_option(key, vm) {
+                Err(exc) => {
+                    if objtype::isinstance(&exc, &vm.ctx.exceptions.key_error) {
+                        Ok(None)
+                    } else {
+                        Err(exc)
+                    }
+                }
+                Ok(x) => Ok(x),
             }
         } else {
-            let iter = objiter::get_iter(vm, dict_obj)?;
-            loop {
-                fn err(vm: &mut VirtualMachine) -> PyObjectRef {
-                    vm.new_type_error("Iterator must have exactly two elements".to_string())
+            // Fall back to full get_item with KeyError checking
+
+            match self.get_item(key, vm) {
+                Ok(value) => Ok(Some(value)),
+                Err(exc) => {
+                    if objtype::isinstance(&exc, &vm.ctx.exceptions.key_error) {
+                        Ok(None)
+                    } else {
+                        Err(exc)
+                    }
                 }
-                let element = match objiter::get_next_object(vm, &iter)? {
-                    Some(obj) => obj,
-                    None => break,
-                };
-                let elem_iter = objiter::get_iter(vm, &element)?;
-                let needle = objiter::get_next_object(vm, &elem_iter)?.ok_or_else(|| err(vm))?;
-                let value = objiter::get_next_object(vm, &elem_iter)?.ok_or_else(|| err(vm))?;
-                if objiter::get_next_object(vm, &elem_iter)?.is_some() {
-                    return Err(err(vm));
-                }
-                set_item(&dict, vm, &needle, &value);
             }
         }
     }
-    for (needle, value) in args.kwargs {
-        let py_needle = vm.new_str(needle);
-        set_item(&dict, vm, &py_needle, &value);
+}
+
+impl ItemProtocol for PyDictRef {
+    fn get_item<T: IntoPyObject + DictKey + Copy>(&self, key: T, vm: &VirtualMachine) -> PyResult {
+        self.as_object().get_item(key, vm)
     }
-    Ok(dict)
+
+    fn set_item<T: IntoPyObject + DictKey + Copy>(
+        &self,
+        key: T,
+        value: PyObjectRef,
+        vm: &VirtualMachine,
+    ) -> PyResult {
+        if self.typ().is(&vm.ctx.dict_type()) {
+            self.inner_setitem_fast(key, value, vm)
+                .map(|_| vm.ctx.none())
+        } else {
+            // Fall back to slow path if we are in a dict subclass:
+            self.as_object().set_item(key, value, vm)
+        }
+    }
+
+    fn del_item<T: IntoPyObject + DictKey + Copy>(&self, key: T, vm: &VirtualMachine) -> PyResult {
+        self.as_object().del_item(key, vm)
+    }
 }
 
-fn dict_len(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(dict_obj, Some(vm.ctx.dict_type()))]);
-    let elements = get_elements(dict_obj);
-    Ok(vm.ctx.new_int(elements.len()))
+// Implement IntoIterator so that we can easily iterate dictionaries from rust code.
+impl IntoIterator for PyDictRef {
+    type Item = (PyObjectRef, PyObjectRef);
+    type IntoIter = DictIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        DictIter::new(self)
+    }
 }
 
-fn dict_repr(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(dict_obj, Some(vm.ctx.dict_type()))]);
+impl IntoIterator for &PyDictRef {
+    type Item = (PyObjectRef, PyObjectRef);
+    type IntoIter = DictIter;
 
-    let s = if let Some(_guard) = ReprGuard::enter(dict_obj) {
-        let elements = get_key_value_pairs(dict_obj);
-        let mut str_parts = vec![];
-        for (key, value) in elements {
-            let key_repr = vm.to_repr(&key)?;
-            let value_repr = vm.to_repr(&value)?;
-            let key_str = objstr::get_value(&key_repr);
-            let value_str = objstr::get_value(&value_repr);
-            str_parts.push(format!("{}: {}", key_str, value_str));
+    fn into_iter(self) -> Self::IntoIter {
+        DictIter::new(self.clone())
+    }
+}
+
+pub struct DictIter {
+    dict: PyDictRef,
+    position: usize,
+}
+
+impl DictIter {
+    pub fn new(dict: PyDictRef) -> DictIter {
+        DictIter { dict, position: 0 }
+    }
+}
+
+impl Iterator for DictIter {
+    type Item = (PyObjectRef, PyObjectRef);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.dict.entries.borrow().next_entry(&mut self.position) {
+            Some((key, value)) => Some((key.clone(), value.clone())),
+            None => None,
+        }
+    }
+}
+
+macro_rules! dict_iterator {
+    ( $name: ident, $iter_name: ident, $class: ident, $iter_class: ident, $class_name: literal, $iter_class_name: literal, $result_fn: expr) => {
+        #[pyclass(name = $class_name)]
+        #[derive(Debug)]
+        struct $name {
+            pub dict: PyDictRef,
         }
 
-        format!("{{{}}}", str_parts.join(", "))
-    } else {
-        "{...}".to_string()
+        #[pyimpl]
+        impl $name {
+            fn new(dict: PyDictRef) -> Self {
+                $name { dict: dict }
+            }
+
+            #[pymethod(name = "__iter__")]
+            fn iter(&self, _vm: &VirtualMachine) -> $iter_name {
+                $iter_name::new(self.dict.clone())
+            }
+
+            #[pymethod(name = "__len__")]
+            fn len(&self, vm: &VirtualMachine) -> usize {
+                self.dict.clone().len(vm)
+            }
+        }
+
+        impl PyValue for $name {
+            fn class(vm: &VirtualMachine) -> PyClassRef {
+                vm.ctx.types.$class.clone()
+            }
+        }
+
+        #[pyclass(name = $iter_class_name)]
+        #[derive(Debug)]
+        struct $iter_name {
+            pub dict: PyDictRef,
+            pub size: dictdatatype::DictSize,
+            pub position: Cell<usize>,
+        }
+
+        #[pyimpl]
+        impl $iter_name {
+            fn new(dict: PyDictRef) -> Self {
+                $iter_name {
+                    position: Cell::new(0),
+                    size: dict.size(),
+                    dict,
+                }
+            }
+
+            #[pymethod(name = "__next__")]
+            #[allow(clippy::redundant_closure_call)]
+            fn next(&self, vm: &VirtualMachine) -> PyResult {
+                let mut position = self.position.get();
+                let dict = self.dict.entries.borrow();
+                if dict.has_changed_size(&self.size) {
+                    return Err(vm.new_exception(
+                        vm.ctx.exceptions.runtime_error.clone(),
+                        "dictionary changed size during iteration".to_string(),
+                    ));
+                }
+                match dict.next_entry(&mut position) {
+                    Some((key, value)) => {
+                        self.position.set(position);
+                        Ok($result_fn(vm, key, value))
+                    }
+                    None => Err(objiter::new_stop_iteration(vm)),
+                }
+            }
+
+            #[pymethod(name = "__iter__")]
+            fn iter(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyRef<Self> {
+                zelf
+            }
+        }
+
+        impl PyValue for $iter_name {
+            fn class(vm: &VirtualMachine) -> PyClassRef {
+                vm.ctx.types.$iter_class.clone()
+            }
+        }
     };
-    Ok(vm.new_str(s))
 }
 
-pub fn dict_contains(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (dict, Some(vm.ctx.dict_type())),
-            (needle, Some(vm.ctx.str_type()))
-        ]
-    );
-
-    let needle = objstr::get_value(&needle);
-    for element in get_elements(dict).iter() {
-        if &needle == element.0 {
-            return Ok(vm.new_bool(true));
-        }
-    }
-
-    Ok(vm.new_bool(false))
+dict_iterator! {
+    PyDictKeys,
+    PyDictKeyIterator,
+    dictkeys_type,
+    dictkeyiterator_type,
+    "dictkeys",
+    "dictkeyiterator",
+    |_vm: &VirtualMachine, key: &PyObjectRef, _value: &PyObjectRef| key.clone()
 }
 
-fn dict_delitem(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (dict, Some(vm.ctx.dict_type())),
-            (needle, Some(vm.ctx.str_type()))
-        ]
-    );
-
-    // What we are looking for:
-    let needle = objstr::get_value(&needle);
-
-    // Delete the item:
-    let mut elements = get_mut_elements(dict);
-    match elements.remove(&needle) {
-        Some(_) => Ok(vm.get_none()),
-        None => Err(vm.new_value_error(format!("Key not found: {}", needle))),
-    }
+dict_iterator! {
+    PyDictValues,
+    PyDictValueIterator,
+    dictvalues_type,
+    dictvalueiterator_type,
+    "dictvalues",
+    "dictvalueiterator",
+    |_vm: &VirtualMachine, _key: &PyObjectRef, value: &PyObjectRef| value.clone()
 }
 
-fn dict_clear(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(dict, Some(vm.ctx.dict_type()))]);
-    get_mut_elements(dict).clear();
-    Ok(vm.get_none())
-}
-
-/// When iterating over a dictionary, we iterate over the keys of it.
-fn dict_iter(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(vm, args, required = [(dict, Some(vm.ctx.dict_type()))]);
-
-    let keys = get_elements(dict)
-        .keys()
-        .map(|k| vm.ctx.new_str(k.to_string()))
-        .collect();
-    let key_list = vm.ctx.new_list(keys);
-
-    let iter_obj = PyObject::new(
-        PyObjectPayload::Iterator {
-            position: Cell::new(0),
-            iterated_obj: key_list,
-        },
-        vm.ctx.iter_type(),
-    );
-
-    Ok(iter_obj)
-}
-
-fn dict_setitem(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (dict, Some(vm.ctx.dict_type())),
-            (needle, Some(vm.ctx.str_type())),
-            (value, None)
-        ]
-    );
-
-    set_item(dict, vm, needle, value);
-
-    Ok(vm.get_none())
-}
-
-fn dict_getitem(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (dict, Some(vm.ctx.dict_type())),
-            (needle, Some(vm.ctx.str_type()))
-        ]
-    );
-
-    // What we are looking for:
-    let needle = objstr::get_value(&needle);
-
-    let elements = get_elements(dict);
-    if elements.contains_key(&needle) {
-        Ok(elements[&needle].1.clone())
-    } else {
-        Err(vm.new_value_error(format!("Key not found: {}", needle)))
-    }
-}
-
-pub fn create_type(type_type: PyObjectRef, object_type: PyObjectRef, dict_type: PyObjectRef) {
-    // this is not ideal
-    let ptr = PyObjectRef::into_raw(dict_type.clone()) as *mut PyObject;
-    unsafe {
-        (*ptr).payload = PyObjectPayload::Class {
-            name: String::from("dict"),
-            dict: RefCell::new(HashMap::new()),
-            mro: vec![object_type],
-        };
-        (*ptr).typ = Some(type_type.clone());
-    }
+dict_iterator! {
+    PyDictItems,
+    PyDictItemIterator,
+    dictitems_type,
+    dictitemiterator_type,
+    "dictitems",
+    "dictitemiterator",
+    |vm: &VirtualMachine, key: &PyObjectRef, value: &PyObjectRef|
+        vm.ctx.new_tuple(vec![key.clone(), value.clone()])
 }
 
 pub fn init(context: &PyContext) {
-    let dict_type = &context.dict_type;
-    context.set_attr(&dict_type, "__len__", context.new_rustfunc(dict_len));
-    context.set_attr(
-        &dict_type,
-        "__contains__",
-        context.new_rustfunc(dict_contains),
-    );
-    context.set_attr(
-        &dict_type,
-        "__delitem__",
-        context.new_rustfunc(dict_delitem),
-    );
-    context.set_attr(
-        &dict_type,
-        "__getitem__",
-        context.new_rustfunc(dict_getitem),
-    );
-    context.set_attr(&dict_type, "__iter__", context.new_rustfunc(dict_iter));
-    context.set_attr(&dict_type, "__new__", context.new_rustfunc(dict_new));
-    context.set_attr(&dict_type, "__repr__", context.new_rustfunc(dict_repr));
-    context.set_attr(
-        &dict_type,
-        "__setitem__",
-        context.new_rustfunc(dict_setitem),
-    );
-    context.set_attr(&dict_type, "clear", context.new_rustfunc(dict_clear));
+    extend_class!(context, &context.types.dict_type, {
+        "__bool__" => context.new_rustfunc(PyDictRef::bool),
+        "__len__" => context.new_rustfunc(PyDictRef::len),
+        "__sizeof__" => context.new_rustfunc(PyDictRef::sizeof),
+        "__contains__" => context.new_rustfunc(PyDictRef::contains),
+        "__delitem__" => context.new_rustfunc(PyDictRef::inner_delitem),
+        "__eq__" => context.new_rustfunc(PyDictRef::eq),
+        "__ne__" => context.new_rustfunc(PyDictRef::ne),
+        "__getitem__" => context.new_rustfunc(PyDictRef::inner_getitem),
+        "__iter__" => context.new_rustfunc(PyDictRef::iter),
+        (slot new) => PyDictRef::new,
+        "__repr__" => context.new_rustfunc(PyDictRef::repr),
+        "__setitem__" => context.new_rustfunc(PyDictRef::inner_setitem),
+        "__hash__" => context.new_rustfunc(PyDictRef::hash),
+        "clear" => context.new_rustfunc(PyDictRef::clear),
+        "values" => context.new_rustfunc(PyDictRef::values),
+        "items" => context.new_rustfunc(PyDictRef::items),
+        "keys" => context.new_rustfunc(PyDictRef::keys),
+        "fromkeys" => context.new_classmethod(PyDictRef::fromkeys),
+        "get" => context.new_rustfunc(PyDictRef::get),
+        "setdefault" => context.new_rustfunc(PyDictRef::setdefault),
+        "copy" => context.new_rustfunc(PyDictRef::copy),
+        "update" => context.new_rustfunc(PyDictRef::update),
+        "pop" => context.new_rustfunc(PyDictRef::pop),
+        "popitem" => context.new_rustfunc(PyDictRef::popitem),
+    });
+
+    PyDictKeys::extend_class(context, &context.types.dictkeys_type);
+    PyDictKeyIterator::extend_class(context, &context.types.dictkeyiterator_type);
+    PyDictValues::extend_class(context, &context.types.dictvalues_type);
+    PyDictValueIterator::extend_class(context, &context.types.dictvalueiterator_type);
+    PyDictItems::extend_class(context, &context.types.dictitems_type);
+    PyDictItemIterator::extend_class(context, &context.types.dictitemiterator_type);
 }

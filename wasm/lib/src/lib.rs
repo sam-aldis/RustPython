@@ -1,5 +1,6 @@
 pub mod browser_module;
 pub mod convert;
+pub mod js_module;
 pub mod vm_class;
 pub mod wasm_builtins;
 
@@ -34,7 +35,7 @@ fn panic_hook(info: &panic::PanicInfo) {
         Ok(stack) => stack,
         Err(_) => return,
     };
-    let _ = Reflect::set(&window, &"__RUSTPYTHON_ERROR_STACK".into(), &stack.into());
+    let _ = Reflect::set(&window, &"__RUSTPYTHON_ERROR_STACK".into(), &stack);
 }
 
 #[wasm_bindgen(start)]
@@ -62,7 +63,7 @@ const TS_CMT_START: &'static str = "/*";
 ///     receive the Python kwargs as the `this` argument.
 /// -   `stdout?`: `(out: string) => void`: A function to replace the native print
 ///     function, by default `console.log`.
-pub fn eval_py(source: String, options: Option<Object>) -> Result<JsValue, JsValue> {
+pub fn eval_py(source: &str, options: Option<Object>) -> Result<JsValue, JsValue> {
     let options = options.unwrap_or_else(Object::new);
     let js_vars = {
         let prop = Reflect::get(&options, &"vars".into())?;

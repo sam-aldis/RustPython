@@ -1,154 +1,118 @@
-use crate::pyobject::{
-    AttributeProtocol, IdProtocol, PyContext, PyFuncArgs, PyObjectPayload, PyResult, TypeProtocol,
-};
+use super::objcode::PyCodeRef;
+use super::objdict::PyDictRef;
+use super::objstr::PyStringRef;
+use super::objtuple::PyTupleRef;
+use super::objtype::PyClassRef;
+use crate::function::PyFuncArgs;
+use crate::pyobject::{IdProtocol, PyContext, PyObjectRef, PyRef, PyResult, PyValue, TypeProtocol};
+use crate::scope::Scope;
 use crate::vm::VirtualMachine;
 
+pub type PyFunctionRef = PyRef<PyFunction>;
+
+#[derive(Debug)]
+pub struct PyFunction {
+    // TODO: these shouldn't be public
+    pub code: PyCodeRef,
+    pub scope: Scope,
+    pub defaults: Option<PyTupleRef>,
+    pub kw_only_defaults: Option<PyDictRef>,
+}
+
+impl PyFunction {
+    pub fn new(
+        code: PyCodeRef,
+        scope: Scope,
+        defaults: Option<PyTupleRef>,
+        kw_only_defaults: Option<PyDictRef>,
+    ) -> Self {
+        PyFunction {
+            code,
+            scope,
+            defaults,
+            kw_only_defaults,
+        }
+    }
+}
+
+impl PyValue for PyFunction {
+    fn class(vm: &VirtualMachine) -> PyClassRef {
+        vm.ctx.function_type()
+    }
+}
+
+impl PyFunctionRef {
+    fn call(func: PyObjectRef, args: PyFuncArgs, vm: &VirtualMachine) -> PyResult {
+        vm.invoke(&func, args)
+    }
+
+    fn code(self, _vm: &VirtualMachine) -> PyCodeRef {
+        self.code.clone()
+    }
+
+    fn defaults(self, _vm: &VirtualMachine) -> Option<PyTupleRef> {
+        self.defaults.clone()
+    }
+
+    fn kwdefaults(self, _vm: &VirtualMachine) -> Option<PyDictRef> {
+        self.kw_only_defaults.clone()
+    }
+}
+
+#[derive(Debug)]
+pub struct PyMethod {
+    // TODO: these shouldn't be public
+    pub object: PyObjectRef,
+    pub function: PyObjectRef,
+}
+
+impl PyMethod {
+    pub fn new(object: PyObjectRef, function: PyObjectRef) -> Self {
+        PyMethod { object, function }
+    }
+
+    fn getattribute(&self, name: PyStringRef, vm: &VirtualMachine) -> PyResult {
+        vm.get_attribute(self.function.clone(), name.clone())
+    }
+}
+
+impl PyValue for PyMethod {
+    fn class(vm: &VirtualMachine) -> PyClassRef {
+        vm.ctx.bound_method_type()
+    }
+}
+
 pub fn init(context: &PyContext) {
-    let function_type = &context.function_type;
-    context.set_attr(&function_type, "__get__", context.new_rustfunc(bind_method));
+    let function_type = &context.types.function_type;
+    extend_class!(context, function_type, {
+        "__get__" => context.new_rustfunc(bind_method),
+        "__call__" => context.new_rustfunc(PyFunctionRef::call),
+        "__code__" => context.new_property(PyFunctionRef::code),
+        "__defaults__" => context.new_property(PyFunctionRef::defaults),
+        "__kwdefaults__" => context.new_property(PyFunctionRef::kwdefaults),
+    });
 
-    context.set_attr(
-        &function_type,
-        "__code__",
-        context.new_member_descriptor(function_code),
-    );
+    let builtin_function_or_method_type = &context.types.builtin_function_or_method_type;
+    extend_class!(context, builtin_function_or_method_type, {
+        "__get__" => context.new_rustfunc(bind_method),
+        "__call__" => context.new_rustfunc(PyFunctionRef::call),
+    });
 
-    let builtin_function_or_method_type = &context.builtin_function_or_method_type;
-    context.set_attr(
-        &builtin_function_or_method_type,
-        "__get__",
-        context.new_rustfunc(bind_method),
-    );
-
-    let member_descriptor_type = &context.member_descriptor_type;
-    context.set_attr(
-        &member_descriptor_type,
-        "__get__",
-        context.new_rustfunc(member_get),
-    );
-
-    let classmethod_type = &context.classmethod_type;
-    context.set_attr(
-        &classmethod_type,
-        "__get__",
-        context.new_rustfunc(classmethod_get),
-    );
-    context.set_attr(
-        &classmethod_type,
-        "__new__",
-        context.new_rustfunc(classmethod_new),
-    );
-
-    let staticmethod_type = &context.staticmethod_type;
-    context.set_attr(
-        staticmethod_type,
-        "__get__",
-        context.new_rustfunc(staticmethod_get),
-    );
-    context.set_attr(
-        staticmethod_type,
-        "__new__",
-        context.new_rustfunc(staticmethod_new),
-    );
+    let method_type = &context.types.bound_method_type;
+    extend_class!(context, method_type, {
+        "__getattribute__" => context.new_rustfunc(PyMethod::getattribute),
+    });
 }
 
-fn bind_method(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(function, None), (obj, None), (cls, None)]
-    );
-
-    if obj.is(&vm.get_none()) && !cls.is(&obj.typ()) {
-        Ok(function.clone())
+fn bind_method(
+    function: PyObjectRef,
+    obj: PyObjectRef,
+    cls: PyObjectRef,
+    vm: &VirtualMachine,
+) -> PyResult {
+    if obj.is(&vm.get_none()) && !cls.is(&obj.class()) {
+        Ok(function)
     } else {
-        Ok(vm.ctx.new_bound_method(function.clone(), obj.clone()))
+        Ok(vm.ctx.new_bound_method(function, obj))
     }
-}
-
-fn function_code(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    match args.args[0].payload {
-        PyObjectPayload::Function { ref code, .. } => Ok(code.clone()),
-        _ => Err(vm.new_type_error("no code".to_string())),
-    }
-}
-
-fn member_get(vm: &mut VirtualMachine, mut args: PyFuncArgs) -> PyResult {
-    match args.shift().get_attr("function") {
-        Some(function) => vm.invoke(function, args),
-        None => {
-            let attribute_error = vm.context().exceptions.attribute_error.clone();
-            Err(vm.new_exception(attribute_error, String::from("Attribute Error")))
-        }
-    }
-}
-
-// Classmethod type methods:
-fn classmethod_get(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    trace!("classmethod.__get__ {:?}", args.args);
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (cls, Some(vm.ctx.classmethod_type())),
-            (_inst, None),
-            (owner, None)
-        ]
-    );
-    match cls.get_attr("function") {
-        Some(function) => {
-            let py_obj = owner.clone();
-            let py_method = vm.ctx.new_bound_method(function, py_obj);
-            Ok(py_method)
-        }
-        None => {
-            let attribute_error = vm.context().exceptions.attribute_error.clone();
-            Err(vm.new_exception(
-                attribute_error,
-                String::from("Attribute Error: classmethod must have 'function' attribute"),
-            ))
-        }
-    }
-}
-
-fn classmethod_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    trace!("classmethod.__new__ {:?}", args.args);
-    arg_check!(vm, args, required = [(cls, None), (callable, None)]);
-
-    let py_obj = vm.ctx.new_instance(cls.clone(), None);
-    vm.ctx.set_attr(&py_obj, "function", callable.clone());
-    Ok(py_obj)
-}
-
-// `staticmethod` methods.
-fn staticmethod_get(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    trace!("staticmethod.__get__ {:?}", args.args);
-    arg_check!(
-        vm,
-        args,
-        required = [
-            (cls, Some(vm.ctx.staticmethod_type())),
-            (_inst, None),
-            (_owner, None)
-        ]
-    );
-    match cls.get_attr("function") {
-        Some(function) => Ok(function),
-        None => {
-            let attribute_error = vm.context().exceptions.attribute_error.clone();
-            Err(vm.new_exception(
-                attribute_error,
-                String::from("Attribute Error: staticmethod must have 'function' attribute"),
-            ))
-        }
-    }
-}
-
-fn staticmethod_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    trace!("staticmethod.__new__ {:?}", args.args);
-    arg_check!(vm, args, required = [(cls, None), (callable, None)]);
-
-    let py_obj = vm.ctx.new_instance(cls.clone(), None);
-    vm.ctx.set_attr(&py_obj, "function", callable.clone());
-    Ok(py_obj)
 }

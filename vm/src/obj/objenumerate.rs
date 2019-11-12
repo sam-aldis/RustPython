@@ -1,71 +1,72 @@
 use std::cell::RefCell;
 use std::ops::AddAssign;
 
-use super::objint;
-use super::objiter;
-use crate::pyobject::{PyContext, PyFuncArgs, PyObject, PyObjectPayload, PyResult, TypeProtocol};
-use crate::vm::VirtualMachine;
 use num_bigint::BigInt;
 use num_traits::Zero;
 
-fn enumerate_new(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(cls, Some(vm.ctx.type_type())), (iterable, None)],
-        optional = [(start, Some(vm.ctx.int_type()))]
-    );
-    let counter = if let Some(x) = start {
-        objint::get_value(x)
-    } else {
-        BigInt::zero()
-    };
-    let iterator = objiter::get_iter(vm, iterable)?;
-    Ok(PyObject::new(
-        PyObjectPayload::EnumerateIterator {
-            counter: RefCell::new(counter),
-            iterator,
-        },
-        cls.clone(),
-    ))
+use super::objint::PyIntRef;
+use super::objiter;
+use super::objtype::PyClassRef;
+use crate::function::OptionalArg;
+use crate::pyobject::{PyClassImpl, PyContext, PyObjectRef, PyRef, PyResult, PyValue};
+use crate::vm::VirtualMachine;
+
+#[pyclass]
+#[derive(Debug)]
+pub struct PyEnumerate {
+    counter: RefCell<BigInt>,
+    iterator: PyObjectRef,
+}
+type PyEnumerateRef = PyRef<PyEnumerate>;
+
+impl PyValue for PyEnumerate {
+    fn class(vm: &VirtualMachine) -> PyClassRef {
+        vm.ctx.enumerate_type()
+    }
 }
 
-fn enumerate_next(vm: &mut VirtualMachine, args: PyFuncArgs) -> PyResult {
-    arg_check!(
-        vm,
-        args,
-        required = [(enumerate, Some(vm.ctx.enumerate_type()))]
-    );
+#[pyimpl]
+impl PyEnumerate {
+    #[pyslot(new)]
+    fn tp_new(
+        cls: PyClassRef,
+        iterable: PyObjectRef,
+        start: OptionalArg<PyIntRef>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyEnumerateRef> {
+        let counter = match start {
+            OptionalArg::Present(start) => start.as_bigint().clone(),
+            OptionalArg::Missing => BigInt::zero(),
+        };
 
-    if let PyObjectPayload::EnumerateIterator {
-        ref counter,
-        ref iterator,
-    } = enumerate.payload
-    {
+        let iterator = objiter::get_iter(vm, &iterable)?;
+        PyEnumerate {
+            counter: RefCell::new(counter.clone()),
+            iterator,
+        }
+        .into_ref_with_type(vm, cls)
+    }
+
+    #[pymethod(name = "__next__")]
+    fn next(&self, vm: &VirtualMachine) -> PyResult {
+        let iterator = &self.iterator;
+        let counter = &self.counter;
         let next_obj = objiter::call_next(vm, iterator)?;
         let result = vm
             .ctx
-            .new_tuple(vec![vm.ctx.new_int(counter.borrow().clone()), next_obj]);
+            .new_tuple(vec![vm.ctx.new_bigint(&counter.borrow()), next_obj]);
 
         AddAssign::add_assign(&mut counter.borrow_mut() as &mut BigInt, 1);
 
         Ok(result)
-    } else {
-        panic!("enumerate doesn't have correct payload");
+    }
+
+    #[pymethod(name = "__iter__")]
+    fn iter(zelf: PyRef<Self>, _vm: &VirtualMachine) -> PyRef<Self> {
+        zelf
     }
 }
 
 pub fn init(context: &PyContext) {
-    let enumerate_type = &context.enumerate_type;
-    objiter::iter_type_init(context, enumerate_type);
-    context.set_attr(
-        enumerate_type,
-        "__new__",
-        context.new_rustfunc(enumerate_new),
-    );
-    context.set_attr(
-        enumerate_type,
-        "__next__",
-        context.new_rustfunc(enumerate_next),
-    );
+    PyEnumerate::extend_class(context, &context.types.enumerate_type);
 }

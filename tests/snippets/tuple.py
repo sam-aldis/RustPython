@@ -1,3 +1,5 @@
+from testutils import assert_raises
+
 assert (1,2) == (1,2)
 
 x = (1,2)
@@ -9,7 +11,7 @@ assert y[0] == 1
 assert x + y == (1, 2, 1)
 
 assert x * 3 == (1, 2, 1, 2, 1, 2)
-# assert 3 * x == (1, 2, 1, 2, 1, 2)
+assert 3 * x == (1, 2, 1, 2, 1, 2)
 assert x * 0 == ()
 assert x * -1 == ()  # integers less than zero treated as 0
 
@@ -34,3 +36,58 @@ class Foo(object):
 
 foo = Foo()
 assert (foo,) == (foo,)
+
+a = (1, 2, 3)
+a += 1,
+assert a == (1, 2, 3, 1)
+
+b = (55, *a)
+assert b == (55, 1, 2, 3, 1)
+
+assert () is ()
+
+a = ()
+b = ()
+assert a is b
+
+assert (1,).__ne__((2,))
+assert not (1,).__ne__((1,))
+
+# tuple gt, ge, lt, le
+assert_raises(TypeError, lambda: (0, ()) < (0, 0))
+assert_raises(TypeError, lambda: (0, ()) <= (0, 0))
+assert_raises(TypeError, lambda: (0, ()) > (0, 0))
+assert_raises(TypeError, lambda: (0, ()) >= (0, 0))
+
+assert_raises(TypeError, lambda: (0, 0) < (0, ()))
+assert_raises(TypeError, lambda: (0, 0) <= (0, ()))
+assert_raises(TypeError, lambda: (0, 0) > (0, ()))
+assert_raises(TypeError, lambda: (0, 0) >= (0, ()))
+
+assert (0, 0) < (1, -1)
+assert (0, 0) < (0, 0, 1)
+assert (0, 0) < (0, 0, -1)
+assert (0, 0) <= (0, 0, -1)
+assert not (0, 0, 0, 0) <= (0, -1)
+
+assert (0, 0) > (-1, 1)
+assert (0, 0) >= (-1, 1)
+assert (0, 0, 0) >= (-1, 1)
+
+assert (0, 0) <= (0, 1)
+assert (0, 0) <= (0, 0)
+assert (0, 0) <= (0, 0)
+assert not (0, 0) > (0, 0)
+assert not (0, 0) < (0, 0)
+
+assert not (float('nan'), float('nan')) <= (float('nan'), 1)
+assert not (float('nan'), float('nan')) <= (float('nan'), float('nan'))
+assert not (float('nan'), float('nan')) >= (float('nan'), float('nan'))
+assert not (float('nan'), float('nan')) < (float('nan'), float('nan'))
+assert not (float('nan'), float('nan')) > (float('nan'), float('nan'))
+
+assert (float('inf'), float('inf')) >= (float('inf'), 1)
+assert (float('inf'), float('inf')) <= (float('inf'), float('inf'))
+assert (float('inf'), float('inf')) >= (float('inf'), float('inf'))
+assert not (float('inf'), float('inf')) < (float('inf'), float('inf'))
+assert not (float('inf'), float('inf')) > (float('inf'), float('inf'))

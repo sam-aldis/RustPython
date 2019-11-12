@@ -4,6 +4,49 @@ use std::cmp;
 use std::str::FromStr;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
+pub enum FormatPreconversor {
+    Str,
+    Repr,
+    Ascii,
+}
+
+impl FormatPreconversor {
+    pub fn from_char(c: char) -> Option<FormatPreconversor> {
+        match c {
+            's' => Some(FormatPreconversor::Str),
+            'r' => Some(FormatPreconversor::Repr),
+            'a' => Some(FormatPreconversor::Ascii),
+            _ => None,
+        }
+    }
+
+    pub fn from_string(text: &str) -> Option<FormatPreconversor> {
+        let mut chars = text.chars();
+        if chars.next() != Some('!') {
+            return None;
+        }
+
+        match chars.next() {
+            None => None, // Should fail instead?
+            Some(c) => FormatPreconversor::from_char(c),
+        }
+    }
+
+    pub fn parse_and_consume(text: &str) -> (Option<FormatPreconversor>, &str) {
+        let preconversor = FormatPreconversor::from_string(text);
+        match preconversor {
+            None => (None, text),
+            Some(_) => {
+                let mut chars = text.chars();
+                chars.next(); // Consume the bang
+                chars.next(); // Consume one r,s,a char
+                (preconversor, chars.as_str())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum FormatAlign {
     Left,
     Right,
@@ -56,6 +99,7 @@ pub enum FormatType {
 
 #[derive(Debug, PartialEq)]
 pub struct FormatSpec {
+    preconversor: Option<FormatPreconversor>,
     fill: Option<char>,
     align: Option<FormatAlign>,
     sign: Option<FormatSign>,
@@ -66,13 +110,17 @@ pub struct FormatSpec {
     format_type: Option<FormatType>,
 }
 
-fn get_num_digits(text: &str) -> usize {
+pub fn get_num_digits(text: &str) -> usize {
     for (index, character) in text.char_indices() {
         if !character.is_digit(10) {
             return index;
         }
     }
     text.len()
+}
+
+fn parse_preconversor(text: &str) -> (Option<FormatPreconversor>, &str) {
+    FormatPreconversor::parse_and_consume(text)
 }
 
 fn parse_align(text: &str) -> (Option<FormatAlign>, &str) {
@@ -133,11 +181,11 @@ fn parse_alternate_form(text: &str) -> (bool, &str) {
     }
 }
 
-fn parse_zero(text: &str) -> &str {
+fn parse_zero(text: &str) -> (bool, &str) {
     let mut chars = text.chars();
     match chars.next() {
-        Some('0') => chars.as_str(),
-        _ => text,
+        Some('0') => (true, chars.as_str()),
+        _ => (false, text),
     }
 }
 
@@ -186,16 +234,23 @@ fn parse_format_type(text: &str) -> (Option<FormatType>, &str) {
 }
 
 fn parse_format_spec(text: &str) -> FormatSpec {
-    let (fill, align, after_align) = parse_fill_and_align(text);
+    let (preconversor, after_preconversor) = parse_preconversor(text);
+    let (mut fill, mut align, after_align) = parse_fill_and_align(after_preconversor);
     let (sign, after_sign) = parse_sign(after_align);
     let (alternate_form, after_alternate_form) = parse_alternate_form(after_sign);
-    let after_zero = parse_zero(after_alternate_form);
+    let (zero, after_zero) = parse_zero(after_alternate_form);
     let (width, after_width) = parse_number(after_zero);
     let (grouping_option, after_grouping_option) = parse_grouping_option(after_width);
     let (precision, after_precision) = parse_precision(after_grouping_option);
     let (format_type, _) = parse_format_type(after_precision);
 
+    if zero && fill.is_none() {
+        fill.replace('0');
+        align = align.or(Some(FormatAlign::AfterSign));
+    }
+
     FormatSpec {
+        preconversor,
         fill,
         align,
         sign,
@@ -224,15 +279,12 @@ impl FormatSpec {
         separator: char,
     ) -> String {
         let mut result = String::new();
-        let mut remaining: usize = magnitude_string.len() % interval;
-        if remaining == 0 {
-            remaining = interval;
-        }
+        let mut remaining: usize = magnitude_string.len();
         for c in magnitude_string.chars() {
             result.push(c);
-            if remaining == 0 {
+            remaining -= 1;
+            if remaining % interval == 0 && remaining > 0 {
                 result.push(separator);
-                remaining = interval;
             }
         }
         result
@@ -467,6 +519,18 @@ impl FormatString {
             String::new()
         };
 
+        // On parts[0] can still be the preconversor (!r, !s, !a)
+        let parts: Vec<&str> = arg_part.splitn(2, '!').collect();
+        // before the bang is a keyword or arg index, after the comma is maybe a conversor spec.
+        let arg_part = parts[0];
+
+        let preconversor_spec = if parts.len() > 1 {
+            "!".to_string() + parts[1]
+        } else {
+            String::new()
+        };
+        let format_spec = preconversor_spec + &format_spec;
+
         if arg_part.is_empty() {
             return Ok(FormatPart::AutoSpec(format_spec));
         }
@@ -551,6 +615,7 @@ mod tests {
     #[test]
     fn test_width_only() {
         let expected = FormatSpec {
+            preconversor: None,
             fill: None,
             align: None,
             sign: None,
@@ -566,6 +631,7 @@ mod tests {
     #[test]
     fn test_fill_and_width() {
         let expected = FormatSpec {
+            preconversor: None,
             fill: Some('<'),
             align: Some(FormatAlign::Right),
             sign: None,
@@ -581,6 +647,7 @@ mod tests {
     #[test]
     fn test_all() {
         let expected = FormatSpec {
+            preconversor: None,
             fill: Some('<'),
             align: Some(FormatAlign::Right),
             sign: Some(FormatSign::Minus),
